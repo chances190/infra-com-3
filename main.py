@@ -17,164 +17,151 @@ from enum import Enum, auto
 # Define application states as an enum
 class AppMode(Enum):
     NAVIGATION = auto()
-    INPUT = auto()
+    CONTENT = auto()
 
 # Centralized state management
 class AppState:
     def __init__(self):
         self.mode = AppMode.NAVIGATION
         self.messages = ["Welcome to the chat room!"]
-        self.selected_menu_idx = 0
-        self.input_text = ""
+        self.selected_content = ""
 
 # Base UI component class
 class UIComponent:
-    def __init__(self, app_state):
+    def __init__(self, app_state, title):
         self.state = app_state
+        self.title = title
+        self.window = None
     
     def draw(self, stdscr):
         pass
     
     def handle_input(self, key):
-        return False  # Return True if the app should exit
-    
-    def resize(self):
-        pass
-
-# Menu component
-class MenuComponent(UIComponent):
-    def __init__(self, app_state, items, x, y, width, height):
-        super().__init__(app_state)
-        self.items = items
-        self.x = x
-        self.y = y
-        self.width = width
-        self.height = height
-        self.window = None
-        self.create_window()
-        
-    def create_window(self):
-        self.window = curses.newwin(self.height, self.width, self.y, self.x)
-        self.window.keypad(True)
+        if key in (curses.KEY_LEFT, 27):
+            self.state.mode = AppMode.NAVIGATION
+        return False 
     
     def resize(self, x, y, width, height):
         self.x = x
         self.y = y
         self.width = width
         self.height = height
-        self.create_window()
+        self.window = curses.newwin(self.height, self.width, self.y, self.x)
+        self.window.keypad(True)
+
+# Menu component
+class MenuComponent(UIComponent):
+    def __init__(self, app_state, title, menu_structure):
+        super().__init__(app_state, title)
+        self.menu_structure = menu_structure
+        self.selected_menu_idx = 0  # Local state for menu index
+        self.previous_menu_idx = {title: 0}  # Track previous indices for each menu locally
     
     def draw(self, colors):
         self.window.clear()
         self.window.border()
-        self.window.addstr(0, 2, " Menu ", colors.CYAN_BLACK)
+        self.window.addstr(0, 2, f" {self.title} ", colors.CYAN_BLACK)  # Use title property
         
-        for idx, item in enumerate(self.items):
+        current_menu_items = self.menu_structure[self.title]
+        for idx, item in enumerate(current_menu_items):
             y = idx + 2
-            if idx == self.state.selected_menu_idx:
+            if idx == self.selected_menu_idx:
                 self.window.addstr(y, 2, "> ", colors.CYAN_BLACK)
-                if self.state.mode == AppMode.INPUT:
-                    self.window.addstr(y, 4, item, colors.WHITE_BLACK)
-                else:
-                    self.window.addstr(y, 4, item, colors.BLACK_WHITE)
+                self.window.addstr(y, 4, item, colors.WHITE_BLACK)
             else:
                 self.window.addstr(y, 2, f"  {item}")
         
         self.window.refresh()
     
     def handle_input(self, key):
-        if self.state.mode == AppMode.NAVIGATION:
-            if key == curses.KEY_UP and self.state.selected_menu_idx > 0:
-                self.state.selected_menu_idx -= 1
-            elif key == curses.KEY_DOWN and self.state.selected_menu_idx < len(self.items) - 1:
-                self.state.selected_menu_idx += 1
-            elif key in (ord('\n'), curses.KEY_RIGHT):
-                if self.items[self.state.selected_menu_idx] == "Exit":
-                    return True  # Signal app to exit
-                self.state.mode = AppMode.INPUT
+        current_menu_items = self.menu_structure[self.title]
+        
+        if key == curses.KEY_UP:
+            if self.selected_menu_idx > 0:
+                self.selected_menu_idx -= 1
+        elif key == curses.KEY_DOWN:
+            if self.selected_menu_idx < len(current_menu_items) - 1:
+                self.selected_menu_idx += 1
+        elif key in (ord('\n'), curses.KEY_RIGHT):
+            selected_item = current_menu_items[self.selected_menu_idx]
+            if selected_item == "Sair":
+                return True
+            elif selected_item in self.menu_structure:
+                self.previous_menu_idx[self.title] = self.selected_menu_idx
+                self.title = selected_item  # Update title to the selected submenu
+                self.selected_menu_idx = self.previous_menu_idx.get(selected_item, 0)
+            else:
+                # Ensure selected_content is set correctly
+                self.state.mode = AppMode.CONTENT
+                self.state.selected_content = selected_item
+        elif key in (27, curses.KEY_LEFT):
+            self.state.selected_content = ""
+            if self.title != "Menu":
+                parent_menu = "Menu"
+                for menu, items in self.menu_structure.items():
+                    if self.title in items:
+                        parent_menu = menu
+                        break
+                self.previous_menu_idx[self.title] = self.selected_menu_idx
+                self.title = parent_menu  # Update title to the parent menu
+                self.selected_menu_idx = self.previous_menu_idx.get(parent_menu, 0)
+        
         return False
 
 # Content component
-class ContentComponent(UIComponent):
-    def __init__(self, app_state, x, y, width, height):
-        super().__init__(app_state)
-        self.x = x
-        self.y = y
-        self.width = width
-        self.height = height
-        self.window = None
+class ContentChatComponent(UIComponent):
+    def __init__(self, app_state, title):
+        super().__init__(app_state, title)
         self.is_typing = False  # Internal flag for typing mode
         self.cursor_pos = 0     # Cursor position in text input
-        self.state.input_text = " "
-        self.create_window()
-        
-    def create_window(self):
-        self.window = curses.newwin(self.height, self.width, self.y, self.x)
-        self.window.keypad(True)
-    
-    def resize(self, x, y, width, height):
-        self.x = x
-        self.y = y
-        self.width = width
-        self.height = height
-        self.create_window()
+        self.input_text = " "
     
     def draw(self, colors):
         self.window.clear()
         self.window.border()
-        self.window.addstr(0, 2, " Chat Room ", colors.CYAN_BLACK)
+        self.window.addstr(0, 2, f" Chat: {self.state.selected_content} ", colors.CYAN_BLACK)
         
-        # Display messages
         for idx, message in enumerate(self.state.messages[-(self.height - 4):]):
             self.window.addstr(idx + 1, 2, message[:self.width - 4])
         
-        # Draw input box separator
         input_box_y = self.height - 2
         self.window.addstr(input_box_y - 1, 2, "-" * (self.width - 4))
-        
-        # Draw input area based on component state
-        self.window.addstr(input_box_y, 2, "> ", colors.CYAN_BLACK)
-        
-        if not self.is_typing:
-            if self.state.mode == AppMode.INPUT:
-                # Highlighted but not actively typing
-                self.window.addstr(input_box_y, 4, self.state.input_text, colors.BLACK_WHITE)
+
+        if self.state.mode == AppMode.CONTENT:
+            self.window.addstr(input_box_y, 2, "> ", colors.CYAN_BLACK)
+            if not self.is_typing:
+                self.window.addstr(input_box_y, 4, self.input_text, colors.BLACK_WHITE)
             else:
-                # Normal state
-                self.window.addstr(input_box_y, 4, self.state.input_text)
+                pass  # Typing handled separately
         else:
-            # Actively typing - handled separately by handle_text_input
-            pass
-            
+            self.window.addstr(input_box_y, 2, "> ")
+        
         self.window.refresh()
         return self.window
     
     def handle_input(self, key):
-        if self.state.mode == AppMode.INPUT:
-            if key == 27:  # ESC to exit input mode and clear text
-                self.state.input_text = " "
+        if self.state.mode == AppMode.CONTENT:
+            if key == 27:  # ESC to exit content mode
+                self.input_text = " "
                 self.state.mode = AppMode.NAVIGATION
-            elif key == curses.KEY_LEFT:  # Left arrow to exit input mode
+            elif key == curses.KEY_LEFT:  # Left arrow to exit content mode
                 self.state.mode = AppMode.NAVIGATION
-            elif key == ord('\n'):  # Enter to start text input
+            elif key == ord('\n'):  # Enter to start typing
                 self.is_typing = True
                 if self.handle_text_input():
-                    self.state.messages.append(self.state.input_text.strip())
-                    self.state.input_text = " "
+                    self.state.messages.append(self.input_text.strip())
+                    self.input_text = " "
                 self.is_typing = False
         return False
     
     def handle_text_input(self):
         """Handle text input with custom input management."""
         input_box_y = self.height - 2
-        input_text = self.state.input_text.strip()
+        input_text = self.input_text.strip()
         cursor_pos = self.cursor_pos = len(input_text)
         max_width = self.width - 6  # Account for borders and prompt
         
-        # Show cursor and clear input line
         curses.curs_set(1)
-        
-        # First draw of input area
         self._draw_input_line(input_box_y, input_text, cursor_pos)
         
         while True:
@@ -184,13 +171,13 @@ class ContentComponent(UIComponent):
                 if key == 27:  
                     curses.curs_set(0)
                     cursor_pos = 0
-                    self.state.input_text = input_text
+                    self.input_text = input_text
                     return False
                     
                 elif key == ord('\n'): 
                     curses.curs_set(0)
                     cursor_pos = 0
-                    self.state.input_text = input_text
+                    self.input_text = input_text
                     return True
                 
                 elif key == curses.KEY_LEFT and cursor_pos > 0:
@@ -213,30 +200,19 @@ class ContentComponent(UIComponent):
                         input_text = input_text[:cursor_pos] + chr(key) + input_text[cursor_pos:]
                         cursor_pos += 1
                 
-                # Update and redraw input line
                 self._draw_input_line(input_box_y, input_text, cursor_pos)
                 
             except curses.error:
-                # Handle curses error gracefully, e.g., during terminal resize
                 curses.curs_set(0)
                 return False
     
-    
     def _draw_input_line(self, y, text, cursor_pos):
-        """Draw the input line with cursor positioning."""
-
         max_visible = self.width - 8
-        
-        # Clear input line
         self.window.move(y, 2)
         self.window.clrtoeol()
-        
-        # Add prompt
         self.window.addstr(y, 2, "> ")
         
-        # Handle scrolling for long text
         if len(text) > max_visible:
-            # Determine visible portion based on cursor position
             if cursor_pos < max_visible // 2:
                 visible_text = text[:max_visible]
                 display_cursor_pos = cursor_pos
@@ -247,41 +223,86 @@ class ContentComponent(UIComponent):
                 start = cursor_pos - (max_visible // 2)
                 visible_text = text[start:start + max_visible]
                 display_cursor_pos = max_visible // 2
-                
-            # Draw text
-            self.window.addstr(y, 4, visible_text)
             
-            # Position cursor
+            self.window.addstr(y, 4, visible_text)
             self.window.move(y, 4 + display_cursor_pos)
         else:
-            # For short text, just show everything
             self.window.addstr(y, 4, text)
             self.window.move(y, 4 + cursor_pos)
             
         self.window.refresh()
+
+# Welcome component
+class WelcomeComponent(UIComponent):
+    def resize(self, x, y, width, height):
+        super().resize(x, y, width, height)
+
+    def draw(self, colors):
+        self.window.clear()
+        self.window.border()
+        # Display a proper welcome message with commands
+        self.window.addstr(0, 2, " Welcome ", colors.CYAN_BLACK | curses.A_BOLD)
+        
+        welcome_message = [
+            "Bem-vindo ao Chat de Infra-Com!      ",
+            "Use as seguintes teclas para navegar:",
+            "- ↑ / ↓: Navegar pelos menus         ",
+            "- → / Enter: Selecionar item do menu ",
+            "- ← / ESC: Voltar                    "
+        ]
+        
+        start_y = (self.height - len(welcome_message)) // 2
+        
+        for idx, line in enumerate(welcome_message):
+            x = (self.width - len(line)) // 2  # Center the text horizontally
+            self.window.addstr(start_y + idx, x, line)
+        
+        self.window.refresh()
+        return self.window
+
+# Direct Messages component
+class DirectMessagesComponent(UIComponent):
+    def resize(self, x, y, width, height):
+        super().resize(x, y, width, height)
+
+    def draw(self, colors):
+        self.window.clear()
+        self.window.border()
+        self.window.addstr(0, 2, " Direct Messages ", colors.CYAN_BLACK)
+        self.window.refresh()
+        return self.window
+
 
 # Main application class
 class ChatApp:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.state = AppState()
-        self.menu_items = ["Home", "Settings", "Help", "Exit"]
+        self.menu_structure = {
+            "Menu": ["Chats", "Grupos", "Amigos", "Configurações", "Sair"],
+            "Chats": ["Chat"],
+            "Grupos": ["Grupo 1", "Grupo 2"],
+            "Amigos": ["Pessoa 1", "Pessoa 2"],
+            "Configurações": ["Opção 1", "Opção 2"],
+        }
         self.setup_colors()
-        
-        # Initialize size and components after resize
+        self.menu = MenuComponent(self.state, "Menu", self.menu_structure)
+        self.contents = {
+            "Welcome": WelcomeComponent(self.state, "Bem-Vindo"),
+            "Chat": ContentChatComponent(self.state, "Chat"),
+            "DMs": DirectMessagesComponent(self.state, "DMs"),
+        }
         self.resize()
     
     def setup_colors(self):
         curses.start_color()
         curses.use_default_colors()
         
-        # Define color pairs
         curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)
         curses.init_pair(2, curses.COLOR_CYAN, curses.COLOR_BLACK)
         curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_WHITE)
         curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_WHITE)
         
-        # Create a colors object for easier access
         class Colors:
             WHITE_BLACK = curses.color_pair(1)
             CYAN_BLACK = curses.color_pair(2)
@@ -291,51 +312,42 @@ class ChatApp:
         self.colors = Colors()
     
     def resize(self):
-        # Get terminal dimensions
         sh, sw = self.stdscr.getmaxyx()
-        
-        # Calculate panel dimensions
         left_width = sw // 4
         right_width = sw - left_width - 2
         content_height = sh - 2
         
-        # Clear screen and draw main border
         self.stdscr.clear()
         self.stdscr.attron(self.colors.CYAN_BLACK)
         self.stdscr.border()
         self.stdscr.attroff(self.colors.CYAN_BLACK)
         
-        # Add title
         title = " Projeto Infra-Com: 3ª Entrega "
         self.stdscr.addstr(0, 2, title, self.colors.CYAN_BLACK | curses.A_BOLD)
         self.stdscr.refresh()
         
-        # Create or resize components
-        if not hasattr(self, 'menu'):
-            self.menu = MenuComponent(self.state, self.menu_items, 1, 1, left_width, content_height)
-            self.content = ContentComponent(self.state, left_width + 1, 1, right_width, content_height)
-        else:
-            self.menu.resize(1, 1, left_width, content_height)
-            self.content.resize(left_width + 1, 1, right_width, content_height)
+        self.menu.resize(1, 1, left_width, content_height)
+        # Resize all registered content components
+        for comp in self.contents.values():
+            comp.resize(left_width + 1, 1, right_width, content_height)
     
     def run(self):
-        curses.curs_set(0)  # Hide cursor by default
+        curses.curs_set(0)
         
         while True:
-            # Draw components
             self.menu.draw(self.colors)
-            self.content.draw(self.colors)
             
-            # Handle input
+            current_content = self.contents.get(self.state.selected_content, self.contents["Chat"])
+            current_content.draw(self.colors)
+            
             key = self.stdscr.getch()
-            
             if key == curses.KEY_RESIZE:
                 self.resize()
             elif self.state.mode == AppMode.NAVIGATION:
                 if self.menu.handle_input(key):
                     break
-            elif self.state.mode == AppMode.INPUT:
-                self.content.handle_input(key)
+            elif self.state.mode == AppMode.CONTENT:
+                current_content.handle_input(key)
 
 def main(stdscr):
     app = ChatApp(stdscr)
