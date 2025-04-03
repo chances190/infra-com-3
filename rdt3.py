@@ -24,6 +24,29 @@ RESET = "\033[0m"
 SOURCE_DIR = "./Client"
 DEST_DIR = "./Server"
 
+# Logs de pacotes individuais
+LOG_FILE = "./Logs/logs.txt"
+
+# Configurações de rede
+SENDER_PORT = 5001
+RECEIVER_PORT = 5000
+
+SOCKET_TIMEOUT = 0.1
+
+SENDER_ADDR = ('localhost', SENDER_PORT)
+RECEIVER_ADDR = ('localhost', RECEIVER_PORT)
+
+# Probabilidade de erro
+LOSS_PROB = 0.2
+CORRUPT_PROB = 0.2
+
+# Simulação de latência de rede (em segundos)
+MIN_DELAY = 0.02
+MAX_DELAY = 0.5
+
+# Timeout do RDT Send
+SENDER_TIMEOUT = 0.3
+
 # Estados do Remetente
 WAIT_FOR_DATA = "WAIT_FOR_DATA"
 WAIT_FOR_ACK0 = "WAIT_FOR_ACK0"
@@ -37,28 +60,13 @@ WAIT_FOR_PKT1 = "WAIT_FOR_PKT1"
 DATA_PKT = 0
 ACK_PKT = 1
 
-# Configurações de rede
-SENDER_PORT = 5001
-SENDER_ADDR = ('localhost', SENDER_PORT)
-SENDER_TIMEOUT = 0.2
-
-RECEIVER_PORT = 5000
-RECEIVER_ADDR = ('localhost', RECEIVER_PORT)
-
-# Probabilidade de erro
-LOSS_PROB = 0.2
-CORRUPT_PROB = 0.2
-
-# Simulação de latência de rede (em segundos)
-MIN_DELAY = 0.02
-MAX_DELAY = 0.5
-
 # Marcadores
 END_OF_FILE_MARKER = "__EOF__"
 END_OF_TRANSMISSION_MARKER = "__EOT__"
 
-# Define the log file for Wireshark-style logs
-LOG_FILE = "network_logs.txt"
+
+# Maximum time to wait for RDT operations in seconds
+MAX_RDT_WAIT_TIME = 5.0
 
 def calculate_checksum(data):
     """Calcula um checksum simples"""
@@ -84,7 +92,7 @@ def log_action(action, pkt_type, seq_num, origin=None, dest=None, data_len=None)
     
     flags_str = " [" + (", ".join(flags)) + "]" if flags else ""
     
-    log_message = f"{timestamp} {action.ljust(8)} ({src}) -> ({dst}) - {type_str}{flags_str}\n"
+    log_message = f"{timestamp} {action.ljust(8)} ({src}) -> ({dst}) - {type_str.ljust(4)}{flags_str}\n"
     
     # Write the log message to the log file
     with open(LOG_FILE, "a") as log_file:
@@ -92,18 +100,20 @@ def log_action(action, pkt_type, seq_num, origin=None, dest=None, data_len=None)
 
 class Network:
     """Simula uma rede com latência, perda de pacotes e corrupção"""
-    def __init__(self, loss_prob=LOSS_PROB, corrupt_prob=CORRUPT_PROB, min_delay=MIN_DELAY, max_delay=MAX_DELAY):
-        self.loss_prob = loss_prob
-        self.corrupt_prob = corrupt_prob
-        self.min_delay = min_delay
-        self.max_delay = max_delay
+    def __init__(self):
+        self.loss_prob = LOSS_PROB
+        self.corrupt_prob = CORRUPT_PROB
+        self.min_delay = MIN_DELAY
+        self.max_delay = MAX_DELAY
         
         # Cria os sockets para o remetente e receptor
         self.sender_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sender_socket.bind(SENDER_ADDR)
+        self.sender_socket.settimeout(SOCKET_TIMEOUT)
         
         self.receiver_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.receiver_socket.bind(RECEIVER_ADDR)
+        self.receiver_socket.settimeout(SOCKET_TIMEOUT)
         
         # Cache para último endereço de origem
         self.last_sender_addr = None
@@ -150,8 +160,6 @@ class Network:
             log_action("DROPPED", pkt_type, seq, SENDER_ADDR, RECEIVER_ADDR, data_len)
             return
             
-        # Simula atraso de rede
-        self._simulate_delay()
         
         # Simula corrupção de pacote
         is_corrupt = random.random() < self.corrupt_prob
@@ -177,8 +185,6 @@ class Network:
             log_action("DROPPED", pkt_type, seq, RECEIVER_ADDR, self.last_sender_addr, data_len)
             return
             
-        # Simula atraso de rede
-        self._simulate_delay()
         
         # Simula corrupção de pacote
         is_corrupt = random.random() < self.corrupt_prob
@@ -189,11 +195,9 @@ class Network:
         self.receiver_socket.sendto(packet, self.last_sender_addr)
         log_action("SENT", pkt_type, seq, RECEIVER_ADDR, self.last_sender_addr, data_len)
     
-    def sender_receive(self, timeout=None):
+    def sender_receive(self):
         """Recebe dados para o remetente (ACKs)"""
-        if timeout:
-            self.sender_socket.settimeout(timeout)
-        
+
         try:
             data, addr = self.sender_socket.recvfrom(2048)
             self.last_receiver_addr = addr
@@ -212,14 +216,10 @@ class Network:
         except Exception as e:
             print(f"{BLUE}Erro na rede ao receber: {e}{RESET}")
             raise
-        finally:
-            if timeout:
-                self.sender_socket.settimeout(None)
+
     
-    def receiver_receive(self, timeout=None):
+    def receiver_receive(self):
         """Recebe dados para o receptor (pacotes de dados)"""
-        if timeout:
-            self.receiver_socket.settimeout(timeout)
         
         try:
             data, addr = self.receiver_socket.recvfrom(4096)
@@ -239,9 +239,6 @@ class Network:
         except Exception as e:
             print(f"{GREEN}Erro na rede ao receber: {e}{RESET}")
             raise
-        finally:
-            if timeout:
-                self.receiver_socket.settimeout(None)
     
     def close(self):
         """Fecha os sockets da rede"""
@@ -273,10 +270,11 @@ class RDTSender:
         return header + data
     
     def send(self, data):
-        """Envia dados usando protocolo rdt3.0"""
+        """Envia dados usando protocolo rdt3.0 e espera pelo ACK"""
+            
         if self.state != WAIT_FOR_DATA:
             print(f"{BLUE}SENDER: ERRO - Tentativa de enviar dados enquanto em estado {self.state}{RESET}")
-            return False
+            return
 
         # Cria um pacote com os dados
         packet = self.make_pkt(self.seq, DATA_PKT, data)
@@ -287,6 +285,7 @@ class RDTSender:
         
         # Atualiza o timestamp de último envio
         self.last_send_time = time.time()
+        start_time = time.time()
         
         # Muda o estado para aguardar ACK
         if self.seq == 0:
@@ -296,15 +295,32 @@ class RDTSender:
             self.state = WAIT_FOR_ACK1
             print(f"{BLUE}SENDER: Transição para estado {self.state} (esperando ACK1){RESET}")
         
-        return True
+        # Busy wait for ACK with timeout
+        while self.state != WAIT_FOR_DATA:
+            # Check if we've exceeded maximum wait time
+            if time.time() - start_time > MAX_RDT_WAIT_TIME:
+                print(f"{BLUE}SENDER: Timeout após {MAX_RDT_WAIT_TIME}s de espera, desistindo{RESET}")
+                self.state = WAIT_FOR_DATA  # Reset state to allow future sends
+                return
+            
+            # Try to receive an ACK
+            if self._receive_ack():
+                break
+            
+            # Check for timeout and retransmit if necessary
+            self._check_timeout()
+            
+            # Small sleep to prevent CPU hogging
+            time.sleep(0.01)
     
-    def receive_ack(self):
-        """Tenta receber um ACK"""
+    def _receive_ack(self):
+        """Tenta receber um ACK. Se não houver, retorna."""
         if self.state not in [WAIT_FOR_ACK0, WAIT_FOR_ACK1]:
+            print(f"{BLUE}SENDER: ERRO - Aguardando ACK enquanto estado é WAIT_FOR_DATA{RESET}")
             return False
         
         try:
-            data, addr = self.network.sender_receive(0.1)
+            data, addr = self.network.sender_receive()
             
             # Extrai o tipo de pacote, sequência e checksum
             pkt_type, seq, checksum, data_len = struct.unpack('!BBBi', data[:7])
@@ -341,31 +357,31 @@ class RDTSender:
             print(f"{BLUE}SENDER: ERRO ao receber ACK: {e}{RESET}")
             return False
     
-    def check_timeout(self):
+    def _check_timeout(self):
         """Verifica se houve timeout e retransmite se necessário"""
-        if self.state in [WAIT_FOR_ACK0, WAIT_FOR_ACK1] and time.time() - self.last_send_time > self.timeout:
-            seq_num = 0 if self.state == WAIT_FOR_ACK0 else 1
-            print(f"{BLUE}SENDER: TIMEOUT detectado em {self.state}, retransmitindo pacote SEQ={seq_num}{RESET}")
-            
-            # Envia através da rede simulada
-            self.network.sender_send(self.last_pkt)
-            
-            self.last_send_time = time.time()
-            return True
-        return False
+        if time.time() - self.last_send_time < self.timeout:
+            return False
+        
+        seq_num = 0 if self.state == WAIT_FOR_ACK0 else 1
+        print(f"{BLUE}SENDER: TIMEOUT detectado em {self.state}, retransmitindo pacote SEQ={seq_num}{RESET}")
+        
+        self.network.sender_send(self.last_pkt)
+        self.last_send_time = time.time()
+        return True
+        
     
     def close(self):
         """Encerra o remetente"""
         print(f"{BLUE}---- SENDER Encerrado ----{RESET}")
 
 class RDTReceiver:
-    def __init__(self, network, running_flag=None):
+    def __init__(self, network):
         """Inicializa o receptor RDT"""
         self.state = WAIT_FOR_PKT0
         self.network = network
         print(f"{GREEN}---- RECEIVER criado - Estado inicial: {self.state} ----{RESET}")
     
-    def make_ack(self, seq):
+    def _make_ack(self, seq):
         """Cria um ACK com a sequência especificada"""
         # ACKs são pequenos pacotes sem payload significativo
         dummy_payload = b"ACK"
@@ -375,7 +391,7 @@ class RDTReceiver:
         header = struct.pack('!BBBi', ACK_PKT, seq, checksum, len(dummy_payload))
         return header + dummy_payload
     
-    def unpack(self, packet):
+    def _unpack(self, packet):
         """Extrai informações de um pacote"""
         if len(packet) < 7:
             return None, None, None, None
@@ -389,76 +405,79 @@ class RDTReceiver:
     
     def receive(self):
         """Recebe dados de acordo com o protocolo rdt3.0"""
-        try:
-            packet, addr = self.network.receiver_receive(0.1)
-            
-            pkt_type, seq, checksum, data = self.unpack(packet)
-            
-            if pkt_type is None:
-                return None
-                
-            # Verifica o tipo do pacote
-            if pkt_type != DATA_PKT:
-                return None
-                
-            # Verifica se o checksum está correto
-            is_corrupt = (checksum != calculate_checksum(data))
-            
-            # Processa de acordo com o estado
-            if self.state == WAIT_FOR_PKT0:
-                if not is_corrupt and seq == 0:
-                    # Pacote válido com seq=0, processamos e mudamos de estado
-                    ack_packet = self.make_ack(0)
-                    self.network.receiver_send(ack_packet)
-                    
-                    old_state = self.state
-                    self.state = WAIT_FOR_PKT1
-                    print(f"{GREEN}RECEIVER: Transição de {old_state} → {self.state} (recebido pacote seq=0){RESET}")
-                    
-                    return data  # Retorna os dados diretamente como bytes
-                else:
-                    # Pacote corrompido ou com seq=1 quando esperávamos seq=0
-                    # Reenviamos ACK para o último pacote recebido com sucesso (seq=1)
-                    ack_packet = self.make_ack(1)
-                    self.network.receiver_send(ack_packet)
-                    if is_corrupt:
-                        print(f"{GREEN}RECEIVER: Permanece em {self.state} (recebido pacote corrompido){RESET}")
-                    else:
-                        print(f"{GREEN}RECEIVER: Permanece em {self.state} (recebido pacote com seq incorreta){RESET}")
-            
-            elif self.state == WAIT_FOR_PKT1:
-                if not is_corrupt and seq == 1:
-                    # Pacote válido com seq=1, processamos e mudamos de estado
-                    ack_packet = self.make_ack(1)
-                    self.network.receiver_send(ack_packet)
-                    
-                    old_state = self.state
-                    self.state = WAIT_FOR_PKT0
-                    print(f"{GREEN}RECEIVER: Transição de {old_state} → {self.state} (recebido pacote seq=1){RESET}")
-                    
-                    return data  # Retorna os dados diretamente como bytes
-                else:
-                    # Pacote corrompido ou com seq=0 quando esperávamos seq=1
-                    # Reenviamos ACK para o último pacote recebido com sucesso (seq=0)
-                    ack_packet = self.make_ack(0)
-                    self.network.receiver_send(ack_packet)
-                    if is_corrupt:
-                        print(f"{GREEN}RECEIVER: Permanece em {self.state} (recebido pacote corrompido){RESET}")
-                    else:
-                        print(f"{GREEN}RECEIVER: Permanece em {self.state} (recebido pacote com seq incorreta){RESET}")
-            
-        except socket.timeout:
-            pass
-        except Exception as e:
-            print(f"{GREEN}RECEIVER: ERRO ao receber pacote: {e}{RESET}")
+        start_time = time.time()
         
-        return None
+        while True:
+            # Check if we've exceeded maximum wait time
+            if time.time() - start_time > MAX_RDT_WAIT_TIME:
+                print(f"{GREEN}RECEIVER: Timeout após {MAX_RDT_WAIT_TIME}s de espera, desistindo{RESET}")
+                return None
+                
+            try:
+                packet, addr = self.network.receiver_receive()
+
+                pkt_type, seq, checksum, data = self._unpack(packet)
+
+                # Verifica se o checksum está correto
+                is_corrupt = (checksum != calculate_checksum(data))
+                
+                if not is_corrupt and pkt_type != DATA_PKT:
+                    raise Exception("Invalid packet type received")
+
+                # Processa de acordo com o estado
+                if self.state == WAIT_FOR_PKT0:
+                    if not is_corrupt and seq == 0:
+                        # Pacote válido com seq=0, processamos e mudamos de estado
+                        ack_packet = self._make_ack(0)
+                        self.network.receiver_send(ack_packet)
+
+                        old_state = self.state
+                        self.state = WAIT_FOR_PKT1
+                        print(f"{GREEN}RECEIVER: Transição de {old_state} → {self.state} (recebido pacote seq=0){RESET}")
+
+                        return data  # Retorna os dados diretamente como bytes
+                    else:
+                        # Pacote corrompido ou com seq=1 quando esperávamos seq=0
+                        # Reenviamos ACK para o último pacote recebido com sucesso (seq=1)
+                        ack_packet = self._make_ack(1)
+                        self.network.receiver_send(ack_packet)
+                        if is_corrupt:
+                            print(f"{GREEN}RECEIVER: Permanece em {self.state} (recebido pacote corrompido){RESET}")
+                        else:
+                            print(f"{GREEN}RECEIVER: Permanece em {self.state} (recebido pacote com seq incorreta){RESET}")
+
+                elif self.state == WAIT_FOR_PKT1:
+                    if not is_corrupt and seq == 1:
+                        # Pacote válido com seq=1, processamos e mudamos de estado
+                        ack_packet = self._make_ack(1)
+                        self.network.receiver_send(ack_packet)
+
+                        old_state = self.state
+                        self.state = WAIT_FOR_PKT0
+                        print(f"{GREEN}RECEIVER: Transição de {old_state} → {self.state} (recebido pacote seq=1){RESET}")
+
+                        return data  # Retorna os dados diretamente como bytes
+                    else:
+                        # Pacote corrompido ou com seq=0 quando esperávamos seq=1
+                        # Reenviamos ACK para o último pacote recebido com sucesso (seq=0)
+                        ack_packet = self._make_ack(0)
+                        self.network.receiver_send(ack_packet)
+                        if is_corrupt:
+                            print(f"{GREEN}RECEIVER: Permanece em {self.state} (recebido pacote corrompido){RESET}")
+                        else:
+                            print(f"{GREEN}RECEIVER: Permanece em {self.state} (recebido pacote com seq incorreta){RESET}")
+
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"{GREEN}RECEIVER: ERRO ao receber pacote: {e}")
+                return None
     
     def close(self):
         """Encerra o receptor"""
         print(f"{GREEN}---- RECEIVER Encerrado ----{RESET}")
 
-def sender_thread(network, running_flag):
+def sender_thread(network):
     # Garante que o diretório existe
     client_dir = SOURCE_DIR
     if not os.path.exists(client_dir):
@@ -483,46 +502,32 @@ def sender_thread(network, running_flag):
         
         print(f"{BLUE}============ SENDER: Iniciando transferência: '{filename}'{RESET}")
         
-        # Envia o nome do arquivo de destino
+        # Envia o nome do arquivo de destino - RDT handles retries internally
         sender.send(filename.encode('utf-8'))
-        while sender.state != WAIT_FOR_DATA:
-            sender.check_timeout()
-            sender.receive_ack()
         
         # Envia o arquivo
         with open(filepath, 'rb') as f:
-            while True and running_flag.is_set():
-                    
+            while True:
                 # Lê em chunks de 1KB
                 chunk = f.read(1024)  
                 if not chunk:
                     break
                     
-                # Envia o chunk do arquivo diretamente como bytes
+                # Envia o chunk do arquivo - RDT handles retries internally
                 sender.send(chunk)
-                while sender.state != WAIT_FOR_DATA:
-                    sender.check_timeout()
-                    sender.receive_ack()  
             
-        # Envia marcador de fim de arquivo
-        sender.send(END_OF_FILE_MARKER.encode('utf-8')) 
-        while sender.state != WAIT_FOR_DATA:
-            sender.check_timeout()
-            sender.receive_ack()
+        # Envia marcador de fim de arquivo - RDT handles retries internally
+        sender.send(END_OF_FILE_MARKER.encode('utf-8'))
         
         print(f"{BLUE}============ SENDER: '{filename}' enviado com sucesso{RESET}")
     
-    # Envia marcador de fim de transmissão
-    sender.send(END_OF_TRANSMISSION_MARKER.encode('utf-8')) 
-    while sender.state != WAIT_FOR_DATA:
-        sender.check_timeout()
-        sender.receive_ack()
-        time.sleep(0.1)
+    # Envia marcador de fim de transmissão - RDT handles retries internally
+    sender.send(END_OF_TRANSMISSION_MARKER.encode('utf-8'))
     
     print(f"{BLUE}============ SENDER: Todos os {len(files)} arquivos foram enviados com sucesso{RESET}")
     sender.close()
 
-def receiver_thread(network, running_flag):
+def receiver_thread(network):
     # Garante que o diretório existe
     server_dir = DEST_DIR
     if not os.path.exists(server_dir):
@@ -536,9 +541,10 @@ def receiver_thread(network, running_flag):
     # Recebe cada arquivo
     while True:
         # Recebe o nome do arquivo
-        filename = None
-        while filename is None:
-            filename = receiver.receive()
+        filename = receiver.receive()
+        
+        if filename is None:
+            break
         
         # Verifica se é o sinal de fim de transmissão
         if filename == END_OF_TRANSMISSION_MARKER.encode('utf-8'):
@@ -555,13 +561,11 @@ def receiver_thread(network, running_flag):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         
         with open(destination, 'wb') as f:
-            while running_flag.is_set():  # Check flag at the start of each chunk receipt
+            while True:
                 # Recebe um chunk de dados
-                data = None
-                while data is None:
-                    data = receiver.receive()
-                    
-                if not running_flag.is_set() or data is None:
+                data = receiver.receive()
+                
+                if data is None:
                     break
                     
                 # Verifica se é o final do arquivo
@@ -589,26 +593,21 @@ def main():
     # Cria uma instância da rede compartilhada
     network = Network()
     
-    # Shared running flag
-    running_flag = threading.Event()
-    running_flag.set()  # Set the flag to indicate threads should run
-    
     try:
         # Receiver thread
-        recv_thread = threading.Thread(target=receiver_thread, args=(network, running_flag), daemon=True)
+        recv_thread = threading.Thread(target=receiver_thread, args=(network,), daemon=True)
         recv_thread.start()
 
         time.sleep(1)
 
         # Sender thread
-        send_thread = threading.Thread(target=sender_thread, args=(network, running_flag), daemon=True)
+        send_thread = threading.Thread(target=sender_thread, args=(network,), daemon=True)
         send_thread.start()
 
         recv_thread.join()
         send_thread.join()
     except KeyboardInterrupt:
         print("\nInterrupção detectada. Encerrando o programa...")
-        running_flag.clear()  # Clear the flag to stop threads
     finally:
         # Fecha os sockets da rede após conclusão
         network.close()
