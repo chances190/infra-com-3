@@ -116,7 +116,7 @@ class UDTSocket:
         
         self.socket.settimeout(SOCKET_TIMEOUT)
         self.local_addr = self.socket.getsockname()
-        self.remote_addr = remote_addr
+        self.last_remote_addr = remote_addr
         
         print(f"RDTConnection: Bound to {self.local_addr}")
     
@@ -153,7 +153,7 @@ class UDTSocket:
     
     def send(self, packet):
         """Envia um pacote para o endereço remoto"""
-        if not self.remote_addr:
+        if not self.last_remote_addr:
             print("Não é possível enviar sem um endereço remoto.")
             return
             
@@ -162,7 +162,7 @@ class UDTSocket:
             
         # Simula perda de pacote
         if random.random() < self.loss_prob:
-            log_action("DROPPED", pkt_type, seq, self.local_addr, self.remote_addr, data_len)
+            log_action("DROPPED", pkt_type, seq, self.local_addr, self.last_remote_addr, data_len)
             return
             
         # Simula corrupção de pacote
@@ -174,8 +174,8 @@ class UDTSocket:
         self._simulate_delay()
             
         # Envia o pacote para o endereço remoto
-        self.socket.sendto(packet, self.remote_addr)
-        log_action("SENT", pkt_type, seq, self.local_addr, self.remote_addr, data_len)
+        self.socket.sendto(packet, self.last_remote_addr)
+        log_action("SENT", pkt_type, seq, self.local_addr, self.last_remote_addr, data_len)
     
     def receive(self):
         """Recebe um pacote com condições de rede simuladas"""
@@ -183,9 +183,8 @@ class UDTSocket:
             # Usar um buffer maior do que o MAX_UDP_PACKET_SIZE para evitar overflow
             data, addr = self.socket.recvfrom(4096)
             
-            # Atualiza o endereço remoto se não estiver definido (TOFU)
-            if not self.remote_addr:
-                self.remote_addr = addr
+            # Atualiza o endereço remoto
+            self.last_remote_addr = addr
             
             # Simula atraso de rede
             self._simulate_delay()
@@ -233,7 +232,7 @@ class RDTSocket:
     
     def connect(self, address):
         """Conecta a um endereço remoto"""
-        self.connection.remote_addr = address
+        self.connection.last_remote_addr = address
         print(f"RDTSocket: Conectado a {address}")
     
     def _make_pkt(self, seq, pkt_type, data):
@@ -370,10 +369,6 @@ class RDTSocket:
                 
             try:
                 packet, addr = self.connection.receive()
-                
-                # Atualiza o endereço remoto se não estiver definido (TOFU)
-                if not self.connection.remote_addr:
-                    self.connection.remote_addr = addr
                 
                 pkt_type, seq, checksum, data = self._unpack(packet)
                 
