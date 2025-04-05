@@ -7,13 +7,10 @@ from datetime import datetime
 SERVER_ADDR = ("localhost", 5001)
 
 class Server:
-    def __init__(self, port=5001):
-        self.address = ('localhost', port)
-        self.socket = rdt.RDTSocket(SERVER_ADDR)
-        self.socket.bind(self.address)
-        
-        # Data structures
-        self.users = {}  # username -> {online: bool, socket: socket}
+    def __init__(self):
+        self.socket = rdt.RDTSocket(port=SERVER_ADDR[1])
+
+        self.users = {}  # username -> {online: bool}
         self.friends = {}  # username -> [friend_usernames]
         self.groups = {}  # group_name -> {owner: username, members: [usernames], key: access_key}
         self.messages = {
@@ -21,8 +18,7 @@ class Server:
             "group": {}    # group_name -> [{sender, content, timestamp}]
         }
         self.banned_users = []
-        
-        self.log_message("Server started on {}:{}".format(*self.address))
+        self.log_message("Server started on {}:{}".format(*SERVER_ADDR))
     
     def log_message(self, message):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -42,7 +38,7 @@ class Server:
 
         try:
             while True:
-                data = self.socket.recvfrom()
+                data = self.socket.recv()
                 if data is None:
                     break
 
@@ -69,9 +65,9 @@ class Server:
                         self.socket.send(json.dumps(response).encode())
 
                 except json.JSONDecodeError:
-                    self.log_message("Received invalid JSON data")
+                    self.log_message(f"Received invalid JSON data: {data.decode("utf-8")}")
                 except Exception as e:
-                    self.log_message(f"Error handling client command: {str(e)}")
+                    self.log_message(f"Error handling client command: {str(e)}. Packet content: {data.decode("utf-8")}")
 
         except Exception as e:
             self.log_message(f"Client connection error: {str(e)}")
@@ -128,13 +124,13 @@ class Server:
         else:
             self.users[username]["online"] = True
             self.log_message(f"User logged in: {username}")
-        return None  # No response needed
+        return None
     
     def handle_logout(self, username):
         if username in self.users:
             self.users[username]["online"] = False
             self.log_message(f"User logged out: {username}")
-        return None  # No response needed
+        return None
     
     def handle_list_cinners(self):
         return [user for user in self.users.keys()]
@@ -181,13 +177,14 @@ class Server:
         if chat_key not in self.messages["direct"]:
             self.messages["direct"][chat_key] = []
         
-        return None  # No response needed
+        return True
     
     def handle_unfollow(self, username, friend_name):
         if username in self.friends and friend_name in self.friends[username]:
             self.friends[username].remove(friend_name)
             self.log_message(f"{username} unfollowed {friend_name}")
-        return None  # No response needed
+            return True
+        return False
     
     def handle_create_group(self, username, group_name):
         if not group_name or group_name in self.groups:
@@ -206,7 +203,7 @@ class Server:
         self.messages["group"][group_name] = []
         
         self.log_message(f"Group created: {group_name} by {username} with key {key}")
-        return None  # No response needed
+        return True
     
     def handle_delete_group(self, username, group_name):
         if group_name in self.groups and self.groups[group_name]["owner"] == username:
@@ -274,7 +271,7 @@ class Server:
         self.messages["group"][group_name].append(new_message)
         self.log_message(f"Group message to {group_name} from {username}: {message}")
         
-        return None  # No response needed
+        return True
     
     def handle_chat_friend(self, username, friend_name, message):
         if friend_name not in self.users or username not in self.friends.get(friend_name, []):
@@ -294,8 +291,8 @@ class Server:
         self.messages["direct"][chat_key].append(new_message)
         self.log_message(f"Direct message to {friend_name} from {username}: {message}")
         
-        return None  # No response needed
-    
+        return True
+
     def handle_list_messages(self, username, chat_name):
         # Check if it's a direct chat
         if "_" in chat_name:

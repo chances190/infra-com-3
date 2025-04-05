@@ -8,9 +8,6 @@ class Client:
         self.username = username
         self.socket = rdt.RDTSocket()
         self.socket.connect(SERVER_ADDR)
-        if self.socket.send("Handshake") is False:
-            self.log_message("Failed to connect to server. Shutting down")
-            exit(1)
         self.log_message("Client started")
             
     def log_message(self, message, color=None):
