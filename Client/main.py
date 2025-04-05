@@ -13,19 +13,26 @@ Github Copilot
 
 import curses
 from enum import Enum, auto
+import time
+from .logic import Client  # Import the Client class
 
 # Define application states as an enum
 class AppMode(Enum):
+    LOGIN = auto()
     NAVIGATION = auto()
     CONTENT = auto()
 
 # Centralized state management
 class AppState:
     def __init__(self):
-        self.mode = AppMode.NAVIGATION
+        self.mode = AppMode.LOGIN
         self.messages = ["Welcome to the chat room!"]
         self.selected_content = "Welcome"  # Start with welcome screen
         self.current_topic = ""  # Track the current selected topic/item
+        self.client = None
+        self.chat_histories = {}  # Store chat histories by chat name
+        self.current_chat_type = None  # "friend" or "group"
+        self.refresh_needed = False
 
 # Base UI component class
 class UIComponent:
@@ -59,8 +66,12 @@ class MenuComponent(UIComponent):
         self.selected_menu_idx = 0  # Local state for menu index
         self.previous_menu_idx = {title: 0}  # Track previous indices for each menu locally
         self.prev_selected_item = None  # Track previously selected item
+        self.last_refresh = 0  # Track when we last refreshed menu data
     
     def draw(self, colors):
+        # Try to refresh menus before drawing
+        self.refresh_menus()
+        
         self.window.clear()
         self.window.border()
         self.window.addstr(0, 2, f" {self.title} ", colors.CYAN_BLACK)  # Use title property
@@ -96,6 +107,15 @@ class MenuComponent(UIComponent):
             if content_key:
                 self.state.selected_content = content_key
                 self.state.current_topic = selected_item
+                
+                # Set chat type based on where the item is located in the menu hierarchy
+                if self.title == "Amigos":
+                    self.state.current_chat_type = "friend"
+                elif self.title == "Grupos":
+                    self.state.current_chat_type = "group"
+                
+                # Mark that we need to refresh messages
+                self.state.refresh_needed = True
     
     def handle_input(self, key):
         current_menu_items = self.menu_structure[self.title]
@@ -142,7 +162,62 @@ class MenuComponent(UIComponent):
                     # Update preview when going back to parent menu
                     self.update_content_preview(self.menu_structure[parent_menu][self.selected_menu_idx])
         
+        # Special handling for adding friends or joining groups
+        if self.title == "Descobrir.Usuários" and key == ord('a'):  # 'a' for add friend
+            if self.selected_menu_idx < len(current_menu_items):
+                selected_user = current_menu_items[self.selected_menu_idx]
+                try:
+                    self.state.client.follow(selected_user)
+                    self.state.messages.append(f"Added {selected_user} as friend")
+                    self.last_refresh = 0  # Force refresh
+                except Exception as e:
+                    self.state.messages.append(f"Error adding friend: {str(e)}")
+        
+        elif self.title == "Descobrir.Grupos" and key == ord('j'):  # 'j' for join group
+            if self.selected_menu_idx < len(current_menu_items):
+                selected_group = current_menu_items[self.selected_menu_idx]
+                try:
+                    # For simplicity, using group name as key
+                    self.state.client.join_group(selected_group, selected_group)
+                    self.state.messages.append(f"Joined group {selected_group}")
+                    self.last_refresh = 0  # Force refresh
+                except Exception as e:
+                    self.state.messages.append(f"Error joining group: {str(e)}")
+        
         return False
+    
+    def refresh_menus(self):
+        """Update menu items from the server"""
+        if not self.state.client or time.time() - self.last_refresh < 5:  # Only refresh every 5 seconds
+            return
+            
+        try:
+            # Update friends list
+            friends = self.state.client.list_friends()
+            self.menu_structure["Amigos"] = friends if friends else ["Nenhum amigo ainda"]
+            
+            # Update groups list
+            mygroups = self.state.client.list_mygroups()
+            self.menu_structure["Grupos"] = mygroups if mygroups else ["Nenhum grupo ainda"]
+            
+            # Update available users and groups
+            all_users = self.state.client.list_cinners()
+            self.menu_structure["Descobrir.Usuários"] = [u for u in all_users if u not in friends]
+            
+            all_groups = self.state.client.list_groups()
+            self.menu_structure["Descobrir.Grupos"] = [g for g in all_groups if g not in mygroups]
+            
+            # Update content mappings
+            for friend in friends:
+                self.content_mapping[friend] = "Chat"
+            
+            for group in mygroups:
+                self.content_mapping[group] = "Chat"
+                
+            self.last_refresh = time.time()
+        except Exception:
+            # Handle errors gracefully
+            pass
 
 # Content component
 class ContentChatComponent(UIComponent):
@@ -163,9 +238,30 @@ class ContentChatComponent(UIComponent):
         
         self.window.addstr(0, 2, title, colors.CYAN_BLACK)
         
-        # Draw messages
-        for idx, message in enumerate(self.state.messages[-(self.height - 4):]):
-            self.window.addstr(idx + 1, 2, message[:self.width - 4])
+        # Load messages if needed
+        if self.state.refresh_needed and self.state.current_topic:
+            try:
+                messages = self.state.client.list_messages(self.state.current_topic)
+                self.state.chat_histories[self.state.current_topic] = messages
+                self.state.refresh_needed = False
+            except Exception as e:
+                self.state.messages.append(f"Error loading messages: {str(e)}")
+        
+        # Draw messages from chat history
+        chat_messages = self.state.chat_histories.get(self.state.current_topic, [])
+        display_messages = chat_messages[-(self.height - 4):] if chat_messages else ["No messages yet"]
+        
+        for idx, message in enumerate(display_messages):
+            if isinstance(message, dict):
+                # Format message from server response
+                sender = message.get("sender", "Unknown")
+                content = message.get("content", "")
+                timestamp = message.get("timestamp", "")
+                formatted_msg = f"{timestamp} - {sender}: {content}"
+                self.window.addstr(idx + 1, 2, formatted_msg[:self.width - 4])
+            else:
+                # Format simple string message (like errors)
+                self.window.addstr(idx + 1, 2, message[:self.width - 4])
         
         input_box_y = self.height - 2
         # Draw a bar dividing user input 
@@ -180,7 +276,6 @@ class ContentChatComponent(UIComponent):
                 # When in content mode but not typing, show a highlight
                 self.window.addstr(input_box_y, 4, " ", colors.BLACK_WHITE)
         
-        
         self.window.refresh()
         return self.window
     
@@ -194,7 +289,20 @@ class ContentChatComponent(UIComponent):
 
                 if self.handle_text_input():
                     if self.input_text.strip():
-                        self.state.messages.append(f"You : {self.input_text}")
+                        # Send message based on current chat type
+                        try:
+                            if self.state.current_chat_type == "friend":
+                                self.state.client.chat_friend(self.state.current_topic, self.input_text)
+                            elif self.state.current_chat_type == "group":
+                                # For simplicity, assuming key is the group name
+                                self.state.client.chat_group(self.state.current_topic, self.state.current_topic, self.input_text)
+                            
+                            # Refresh messages after sending
+                            time.sleep(0.2)  # Give server time to process
+                            self.state.refresh_needed = True
+                        except Exception as e:
+                            self.state.messages.append(f"Error sending message: {str(e)}")
+                    
                     # Always reset input text after sending
                     self.input_text = ""
                 
@@ -295,7 +403,11 @@ class WelcomeComponent(UIComponent):
             "Use as seguintes teclas para navegar:",
             "- ↑ / ↓: Navegar pelos menus         ",
             "- → / Enter: Selecionar item do menu ",
-            "- ← / ESC: Voltar                    "
+            "- ← / ESC: Voltar                    ",
+            "",
+            "Na tela Descobrir:                   ",
+            "- 'a': Adicionar amigo               ",
+            "- 'j': Entrar em grupo               "
         ]
         
         start_y = (self.height - len(welcome_message)) // 2
@@ -307,26 +419,91 @@ class WelcomeComponent(UIComponent):
         self.window.refresh()
         return self.window
 
+# Login component
+class LoginComponent(UIComponent):
+    def __init__(self, app_state, title):
+        super().__init__(app_state, title)
+        self.username = ""
+        self.error_message = ""
+        
+    def draw(self, colors):
+        self.window.clear()
+        self.window.border()
+        self.window.addstr(0, 2, " Login ", colors.CYAN_BLACK | curses.A_BOLD)
+        
+        center_y = self.height // 2
+        prompt_text = "Enter your username: "
+        self.window.addstr(center_y - 2, (self.width - len(prompt_text)) // 2, prompt_text)
+        
+        # Draw input box
+        box_width = 30
+        box_x = (self.width - box_width) // 2
+        self.window.addstr(center_y, box_x - 1, "┌" + "─" * box_width + "┐")
+        self.window.addstr(center_y + 1, box_x - 1, "│")
+        
+        # Show username with padding if empty
+        display_username = self.username if self.username else " "
+        self.window.addstr(center_y + 1, box_x, display_username[:box_width].ljust(box_width))
+        
+        self.window.addstr(center_y + 1, box_x + box_width, "│")
+        self.window.addstr(center_y + 2, box_x - 1, "└" + "─" * box_width + "┘")
+        
+        # Show instructions
+        self.window.addstr(center_y + 4, (self.width - 30) // 2, "Press Enter to login")
+        
+        # Show error message if any
+        if self.error_message:
+            self.window.addstr(center_y + 6, (self.width - len(self.error_message)) // 2, 
+                              self.error_message, colors.CYAN_BLACK)
+        
+        self.window.refresh()
+        
+    def handle_input(self, key):
+        if key == ord('\n'):  # Enter key
+            if not self.username.strip():
+                self.error_message = "Username cannot be empty!"
+                return False
+                
+            # Create client and attempt login
+            self.state.client = Client(self.username)
+            
+            if self.state.client.login() is False:
+                self.error_message = "Login failed"
+                return False
+            else:
+                self.state.mode = AppMode.NAVIGATION
+                self.state.selected_content = "Welcome"
+                return True
+                
+        elif key in (curses.KEY_BACKSPACE, 8, 127):  # Backspace
+            self.username = self.username[:-1]
+            self.error_message = ""
+        elif 32 <= key <= 126:  # Printable characters
+            self.username += chr(key)
+            self.error_message = ""
+            
+        return False
+
 # Main application class
 class ChatApp:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.state = AppState()
         self.menu_structure = {
-            "Menu": ["Chats", "Grupos", "Amigos", "Configurações", "Sair"],
+            "Menu": ["Chats", "Grupos", "Amigos", "Descobrir", "Configurações", "Sair"],
             "Chats": ["Chat Geral"],
-            "Grupos": ["Grupo 1", "Grupo 2"],
-            "Amigos": ["Pessoa 1", "Pessoa 2"],
+            "Grupos": [],  # Will be populated from server
+            "Amigos": [],  # Will be populated from server
+            "Descobrir": ["Usuários", "Grupos"],
+            "Descobrir.Usuários": [],  # Will be populated from server
+            "Descobrir.Grupos": [],    # Will be populated from server
             "Configurações": ["Opção 1", "Opção 2"],
             # No explicit "Voltar" option, use the arrow keys
         }
         # Map menu items to content components
         self.content_mapping = {
             "Chat Geral": "Chat",
-            "Grupo 1": "Chat",
-            "Grupo 2": "Chat",
-            "Pessoa 1": "Chat",
-            "Pessoa 2": "Chat",
+            # Friends and groups will be added dynamically
         }
         self.setup_colors()
         self.menu = MenuComponent(self.state, "Menu", self.menu_structure, self.content_mapping)
@@ -334,6 +511,7 @@ class ChatApp:
             "Welcome": WelcomeComponent(self.state, "Bem-Vindo"),
             "Chat": ContentChatComponent(self.state, "Chat"),
         }
+        self.login = LoginComponent(self.state, "Login")
         self.resize()
     
     def setup_colors(self):
@@ -372,25 +550,40 @@ class ChatApp:
         # Resize all registered content components
         for comp in self.contents.values():
             comp.resize(left_width + 1, 1, right_width, content_height)
+        self.login.resize(1, 1, sw - 2, content_height)
     
     def run(self):
         curses.curs_set(0)
         
         while True:
-            self.menu.draw(self.colors)
-            
-            # Use Welcome as default when nothing is selected
-            current_content = self.contents.get(self.state.selected_content, self.contents["Welcome"])
-            current_content.draw(self.colors)
-            
-            key = self.stdscr.getch()
-            if key == curses.KEY_RESIZE:
-                self.resize()
-            elif self.state.mode == AppMode.NAVIGATION:
-                if self.menu.handle_input(key):
-                    break
-            elif self.state.mode == AppMode.CONTENT:
-                current_content.handle_input(key)
+            if self.state.mode == AppMode.LOGIN:
+                self.login.draw(self.colors)
+                key = self.stdscr.getch()
+                if key == curses.KEY_RESIZE:
+                    self.resize()
+                else:
+                    self.login.handle_input(key)
+            else:
+                self.menu.draw(self.colors)
+                
+                # Use Welcome as default when nothing is selected
+                current_content = self.contents.get(self.state.selected_content, self.contents["Welcome"])
+                current_content.draw(self.colors)
+                
+                key = self.stdscr.getch()
+                if key == curses.KEY_RESIZE:
+                    self.resize()
+                elif self.state.mode == AppMode.NAVIGATION:
+                    if self.menu.handle_input(key):
+                        # Do logout before exiting
+                        if self.state.client:
+                            try:
+                                self.state.client.logout()
+                            except Exception:
+                                pass
+                        break
+                elif self.state.mode == AppMode.CONTENT:
+                    current_content.handle_input(key)
 
 def main(stdscr):
     app = ChatApp(stdscr)
