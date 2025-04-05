@@ -1,4 +1,4 @@
-from .logic import Client
+from .client import Client
 from datetime import datetime
 
 PURPLE = "\033[35m"

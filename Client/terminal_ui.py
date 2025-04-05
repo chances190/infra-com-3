@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 """
 Disclaimer: Este arquivo contém a lógica de interface de usuário TUI dos clientes, desenvolvida com a 
 biblioteca `curses`. A implementação deste código contou com o forte auxílio do GitHub Copilot. No 
@@ -14,7 +12,7 @@ Github Copilot
 import curses
 from enum import Enum, auto
 import time
-from .logic import Client  # Import the Client class
+from .client import Client  # Import the Client class
 
 # Define application states as an enum
 class AppMode(Enum):
