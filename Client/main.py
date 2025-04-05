@@ -24,7 +24,8 @@ class AppState:
     def __init__(self):
         self.mode = AppMode.NAVIGATION
         self.messages = ["Welcome to the chat room!"]
-        self.selected_content = ""
+        self.selected_content = "Welcome"  # Start with welcome screen
+        self.current_topic = ""  # Track the current selected topic/item
 
 # Base UI component class
 class UIComponent:
@@ -51,11 +52,13 @@ class UIComponent:
 
 # Menu component
 class MenuComponent(UIComponent):
-    def __init__(self, app_state, title, menu_structure):
+    def __init__(self, app_state, title, menu_structure, content_mapping):
         super().__init__(app_state, title)
         self.menu_structure = menu_structure
+        self.content_mapping = content_mapping  # Map menu items to content components
         self.selected_menu_idx = 0  # Local state for menu index
         self.previous_menu_idx = {title: 0}  # Track previous indices for each menu locally
+        self.prev_selected_item = None  # Track previously selected item
     
     def draw(self, colors):
         self.window.clear()
@@ -68,10 +71,31 @@ class MenuComponent(UIComponent):
             if idx == self.selected_menu_idx:
                 self.window.addstr(y, 2, "> ", colors.CYAN_BLACK)
                 self.window.addstr(y, 4, item, colors.WHITE_BLACK)
+                
+                # Update content preview on hover
+                selected_item = current_menu_items[self.selected_menu_idx]
+                if selected_item != self.prev_selected_item:
+                    self.prev_selected_item = selected_item
+                    self.update_content_preview(selected_item)
             else:
                 self.window.addstr(y, 2, f"  {item}")
         
         self.window.refresh()
+    
+    def update_content_preview(self, selected_item):
+        """Update the content preview based on the currently hovered item"""
+        if selected_item == "Sair":
+            return  # Don't change anything for exit option
+        
+        if selected_item in self.menu_structure:
+            # It's a submenu - no content change needed
+            pass
+        else:
+            # For content items, update the preview
+            content_key = self.content_mapping.get(selected_item, "")
+            if content_key:
+                self.state.selected_content = content_key
+                self.state.current_topic = selected_item
     
     def handle_input(self, key):
         current_menu_items = self.menu_structure[self.title]
@@ -90,12 +114,17 @@ class MenuComponent(UIComponent):
                 self.previous_menu_idx[self.title] = self.selected_menu_idx
                 self.title = selected_item  # Update title to the selected submenu
                 self.selected_menu_idx = self.previous_menu_idx.get(selected_item, 0)
+                # Update preview when entering submenu
+                if self.selected_menu_idx < len(self.menu_structure[selected_item]):
+                    self.update_content_preview(self.menu_structure[selected_item][self.selected_menu_idx])
             else:
-                # Ensure selected_content is set correctly
-                self.state.mode = AppMode.CONTENT
-                self.state.selected_content = selected_item
+                # If selecting a content item, switch to content mode
+                content_key = self.content_mapping.get(selected_item, "")
+                if content_key:
+                    self.state.mode = AppMode.CONTENT
+                    self.state.selected_content = content_key
+                    self.state.current_topic = selected_item
         elif key in (27, curses.KEY_LEFT):
-            self.state.selected_content = ""
             if self.title != "Menu":
                 parent_menu = "Menu"
                 for menu, items in self.menu_structure.items():
@@ -105,6 +134,13 @@ class MenuComponent(UIComponent):
                 self.previous_menu_idx[self.title] = self.selected_menu_idx
                 self.title = parent_menu  # Update title to the parent menu
                 self.selected_menu_idx = self.previous_menu_idx.get(parent_menu, 0)
+                # Reset to Welcome when returning to main menu
+                if parent_menu == "Menu":
+                    self.state.selected_content = "Welcome"
+                    self.state.current_topic = ""
+                else:
+                    # Update preview when going back to parent menu
+                    self.update_content_preview(self.menu_structure[parent_menu][self.selected_menu_idx])
         
         return False
 
@@ -114,43 +150,54 @@ class ContentChatComponent(UIComponent):
         super().__init__(app_state, title)
         self.is_typing = False  # Internal flag for typing mode
         self.cursor_pos = 0     # Cursor position in text input
-        self.input_text = " "
+        self.input_text = " "   # Always reset to a single space
     
     def draw(self, colors):
         self.window.clear()
         self.window.border()
-        self.window.addstr(0, 2, f" Chat: {self.state.selected_content} ", colors.CYAN_BLACK)
         
+        # Display title with current topic if available
+        title = f" {self.title}"
+        if hasattr(self.state, 'current_topic') and self.state.current_topic:
+            title += f": {self.state.current_topic}"
+        
+        self.window.addstr(0, 2, title, colors.CYAN_BLACK)
+        
+        # Draw messages
         for idx, message in enumerate(self.state.messages[-(self.height - 4):]):
             self.window.addstr(idx + 1, 2, message[:self.width - 4])
         
         input_box_y = self.height - 2
+        # Draw a bar dividing user input 
         self.window.addstr(input_box_y - 1, 2, "-" * (self.width - 4))
 
-        if self.state.mode == AppMode.CONTENT:
+        # Always show the input prompt
+        if self.state.mode == AppMode.NAVIGATION:
+            self.window.addstr(input_box_y, 2, "> ", colors.WHITE_BLACK)
+        elif self.state.mode == AppMode.CONTENT:
             self.window.addstr(input_box_y, 2, "> ", colors.CYAN_BLACK)
             if not self.is_typing:
-                self.window.addstr(input_box_y, 4, self.input_text, colors.BLACK_WHITE)
-            else:
-                pass  # Typing handled separately
-        else:
-            self.window.addstr(input_box_y, 2, "> ")
+                # When in content mode but not typing, show a highlight
+                self.window.addstr(input_box_y, 4, " ", colors.BLACK_WHITE)
+        
         
         self.window.refresh()
         return self.window
     
     def handle_input(self, key):
         if self.state.mode == AppMode.CONTENT:
-            if key == 27:  # ESC to exit content mode
-                self.input_text = " "
-                self.state.mode = AppMode.NAVIGATION
-            elif key == curses.KEY_LEFT:  # Left arrow to exit content mode
+            if key in (27,curses.KEY_LEFT):  # ESC or Left arrow to exit content mode
                 self.state.mode = AppMode.NAVIGATION
             elif key == ord('\n'):  # Enter to start typing
                 self.is_typing = True
+                self.input_text = ""
+
                 if self.handle_text_input():
-                    self.state.messages.append(self.input_text.strip())
-                    self.input_text = " "
+                    if self.input_text.strip():
+                        self.state.messages.append(f"You : {self.input_text}")
+                    # Always reset input text after sending
+                    self.input_text = ""
+                
                 self.is_typing = False
         return False
     
@@ -260,19 +307,6 @@ class WelcomeComponent(UIComponent):
         self.window.refresh()
         return self.window
 
-# Direct Messages component
-class DirectMessagesComponent(UIComponent):
-    def resize(self, x, y, width, height):
-        super().resize(x, y, width, height)
-
-    def draw(self, colors):
-        self.window.clear()
-        self.window.border()
-        self.window.addstr(0, 2, " Direct Messages ", colors.CYAN_BLACK)
-        self.window.refresh()
-        return self.window
-
-
 # Main application class
 class ChatApp:
     def __init__(self, stdscr):
@@ -280,17 +314,25 @@ class ChatApp:
         self.state = AppState()
         self.menu_structure = {
             "Menu": ["Chats", "Grupos", "Amigos", "Configurações", "Sair"],
-            "Chats": ["Chat"],
+            "Chats": ["Chat Geral"],
             "Grupos": ["Grupo 1", "Grupo 2"],
             "Amigos": ["Pessoa 1", "Pessoa 2"],
             "Configurações": ["Opção 1", "Opção 2"],
+            # No explicit "Voltar" option, use the arrow keys
+        }
+        # Map menu items to content components
+        self.content_mapping = {
+            "Chat Geral": "Chat",
+            "Grupo 1": "Chat",
+            "Grupo 2": "Chat",
+            "Pessoa 1": "Chat",
+            "Pessoa 2": "Chat",
         }
         self.setup_colors()
-        self.menu = MenuComponent(self.state, "Menu", self.menu_structure)
+        self.menu = MenuComponent(self.state, "Menu", self.menu_structure, self.content_mapping)
         self.contents = {
             "Welcome": WelcomeComponent(self.state, "Bem-Vindo"),
             "Chat": ContentChatComponent(self.state, "Chat"),
-            "DMs": DirectMessagesComponent(self.state, "DMs"),
         }
         self.resize()
     
@@ -337,7 +379,8 @@ class ChatApp:
         while True:
             self.menu.draw(self.colors)
             
-            current_content = self.contents.get(self.state.selected_content, self.contents["Chat"])
+            # Use Welcome as default when nothing is selected
+            current_content = self.contents.get(self.state.selected_content, self.contents["Welcome"])
             current_content.draw(self.colors)
             
             key = self.stdscr.getch()
